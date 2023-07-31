@@ -1,31 +1,23 @@
 package com.github.cleydyr.maven.plugin;
 
-import com.github.cleydyr.dart.command.SassCommand;
-import com.github.cleydyr.dart.command.builder.SassCommandBuilder;
+import com.github.cleydyr.dart.embedded.MavenLoggingHandler;
 import com.github.cleydyr.dart.command.enums.SourceMapURLs;
 import com.github.cleydyr.dart.command.enums.Style;
-import com.github.cleydyr.dart.command.exception.SassCommandException;
-import com.github.cleydyr.dart.command.factory.SassCommandBuilderFactory;
-import com.github.cleydyr.dart.command.files.FileCounter;
-import com.github.cleydyr.dart.command.files.FileCounterException;
 import com.github.cleydyr.dart.net.GithubLatestVersionProvider;
 import com.github.cleydyr.dart.release.DartSassReleaseParameter;
 import com.github.cleydyr.dart.system.OSDetector;
 import com.github.cleydyr.dart.system.io.DartSassExecutableExtractor;
 import com.github.cleydyr.dart.system.io.DefaultCachedFilesDirectoryProviderFactory;
 import com.github.cleydyr.dart.system.io.factory.DartSassExecutableExtractorFactory;
-import java.io.File;
-import java.io.IOException;
-import java.net.URISyntaxException;
-import java.net.URL;
-import java.nio.file.Path;
-import java.time.Duration;
-import java.time.Instant;
-import java.util.List;
-import java.util.function.Supplier;
-import javax.inject.Inject;
+import com.github.cleydyr.dart.system.io.utils.SystemUtils;
+import com.sass_lang.embedded_protocol.OutputStyle;
+import de.larsgrefer.sass.embedded.CompileSuccess;
+import de.larsgrefer.sass.embedded.SassCompilationFailedException;
+import de.larsgrefer.sass.embedded.SassCompiler;
+import de.larsgrefer.sass.embedded.connection.ConnectionFactory;
 import org.apache.maven.plugin.AbstractMojo;
 import org.apache.maven.plugin.MojoExecutionException;
+import org.apache.maven.plugin.MojoFailureException;
 import org.apache.maven.plugins.annotations.LifecyclePhase;
 import org.apache.maven.plugins.annotations.Mojo;
 import org.apache.maven.plugins.annotations.Parameter;
@@ -34,16 +26,26 @@ import org.apache.maven.settings.Proxy;
 import org.apache.maven.settings.Settings;
 import org.codehaus.plexus.util.xml.pull.XmlPullParserException;
 
+import javax.inject.Inject;
+import java.io.File;
+import java.io.IOException;
+import java.net.URISyntaxException;
+import java.net.URL;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Set;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+
 /**
  * Goal that compiles a set of sass/scss files from an input directory to an output directory.
  */
 @SuppressWarnings("deprecation")
 @Mojo(name = "compile-sass", defaultPhase = LifecyclePhase.PROCESS_RESOURCES, threadSafe = true)
 public class CompileSassMojo extends AbstractMojo {
-    private FileCounter fileCounter;
-
-    protected SassCommandBuilder sassCommandBuilder;
-
     protected DartSassExecutableExtractorFactory dartSassExecutableExtractorFactory;
 
     protected GithubLatestVersionProvider githubLatestVersionProvider;
@@ -58,14 +60,10 @@ public class CompileSassMojo extends AbstractMojo {
 
     @Inject
     public CompileSassMojo(
-            FileCounter fileCounter,
-            SassCommandBuilderFactory sassCommandBuilderFactory,
             DartSassExecutableExtractorFactory dartSassExecutableExtractorFactory,
             GithubLatestVersionProvider githubLatestVersionProvider,
             DefaultCachedFilesDirectoryProviderFactory cachedFilesDirectoryProviderFactory,
             MavenSettingsBuilder mavenSettingsBuilder) {
-        this.fileCounter = fileCounter;
-        this.sassCommandBuilder = sassCommandBuilderFactory.getCommanderBuilder();
         this.dartSassExecutableExtractorFactory = dartSassExecutableExtractorFactory;
         this.githubLatestVersionProvider = githubLatestVersionProvider;
         this.cachedFilesDirectoryProvider = cachedFilesDirectoryProviderFactory.get();
@@ -280,7 +278,8 @@ public class CompileSassMojo extends AbstractMojo {
     @Parameter
     private File cachedFilesDirectory;
 
-    public void execute() throws MojoExecutionException {
+    @Override
+    public void execute() throws MojoExecutionException, MojoFailureException {
         validateProxyHostSyntax();
 
         verifyDefaultParameters();
@@ -291,26 +290,125 @@ public class CompileSassMojo extends AbstractMojo {
             extractExecutable();
         }
 
-        SassCommand sassCommand = buildSassCommand();
+        boolean success = true;
+        try (SassCompiler compiler = createSassCompiler()) {
+            Set<Path> candidates = Files.walk(inputFolder.toPath()).collect(Collectors.toSet());
 
-        try {
-            Instant start = Instant.now();
+            long start = System.currentTimeMillis();
+            int count = 0;
+            for (Path inputPath : candidates) {
+                String inputFileName = inputPath.toFile().getName();
+                if (!inputFileName.endsWith(".scss") && !inputFileName.endsWith(".sass") && !inputFileName.endsWith(".css")) {
+                    getLog().debug("Skipped processing " + inputPath + ", unknown file extension");
+                    continue;
+                }
 
-            sassCommand.execute();
+                Path outputPath = getOutputPath(inputPath);
+                if (!isCompilationRequired(inputPath, outputPath)) {
+                    getLog().debug("Skipped " + inputPath + ", compilation is not required");
+                    continue;
+                }
 
-            Instant finish = Instant.now();
+                try {
+                    compileStylesheet(compiler, inputPath, outputPath);
 
-            long elapsedTime = Duration.between(start, finish).toMillis();
+                    count++;
+                } catch (SassCompilationFailedException compilationFailedException) {
+                    if (stopOnError) {
+                        throw new MojoExecutionException(compilationFailedException);
+                    }
 
-            try {
-                long fileCount = fileCounter.getProcessableFileCount(inputFolder.toPath(), outputFolder.toPath());
-
-                getLog().info("Compiled " + fileCount + " files in " + elapsedTime + " ms");
-            } catch (FileCounterException fileCounterException) {
-                throw new MojoExecutionException("Error while obtaining file count: ", fileCounterException);
+                    getLog().error("Compiling " + inputFileName + " failed", compilationFailedException);
+                    success = false;
+                }
             }
-        } catch (SassCommandException sassCommandException) {
-            throw new MojoExecutionException("Can't execute SASS command", sassCommandException);
+
+            getLog().info("Compiled " + count + " files in " + (System.currentTimeMillis() - start) + "ms");
+        } catch (IOException e) {
+            throw new MojoExecutionException(e);
+        }
+
+        if (!success) {
+            throw new MojoFailureException("Execution failed, see individual errors above");
+        }
+    }
+
+    protected Path getOutputPath(Path inputPath) {
+        Path realtiveInputPath = inputFolder.toPath().relativize(inputPath);
+        return outputFolder.toPath().resolve(
+                Path.of(realtiveInputPath.toString()
+                        .replace(".scss", ".css")
+                        .replace(".sass", ".css")));
+    }
+
+    protected boolean isCompilationRequired(Path inputPath, Path outputPath) {
+        if (!update || !outputPath.toFile().exists()) {
+            return true;
+        }
+
+        return true; // TODO handle update=true here (probably with some sort of dependency tree to cascade updates)
+    }
+
+    protected void compileStylesheet(SassCompiler compiler, Path input, Path output) throws IOException, SassCompilationFailedException {
+        long start = System.currentTimeMillis();
+        getLog().debug("Begin compiling " + input);
+        CompileSuccess compileSuccess = compiler.compileFile(input.toFile(), OutputStyle.valueOf(style.name()));
+
+        // Ensure parent directory of output file exists
+        output.getParent().toFile().mkdirs();
+
+        String css = compileSuccess.getCss();
+        if (!noCharset && !StandardCharsets.US_ASCII.newEncoder().canEncode(css)) {
+            css = addEncodingPrefix(css);
+        }
+
+        if (!noSourceMap) {
+            css = addSourceMappingUrl(css, compileSuccess.getSourceMap(), input, output);
+        }
+
+        Files.writeString(output, css);
+
+        getLog().info("Compiled " + input + " to " + output + " in " + (System.currentTimeMillis() - start) + "ms");
+    }
+
+    /**
+     * Adds a source mapping URL to the provided CSS content. Note that if embedSourceMap=false,
+     * this function will also write a .map file containing the source map
+     */
+    protected String addSourceMappingUrl(String css, String sourceMap, Path inputPath, Path outputPath) throws IOException {
+        // ABSOLUTE is generated by default, when sourceMapURLs=RELATIVE it has to be rewritten
+        if (sourceMapURLs == SourceMapURLs.RELATIVE) {
+            sourceMap = sourceMap.replaceAll(
+                    inputPath.toString(),
+                    outputPath.getParent().relativize(inputPath).toString());
+        }
+
+        // Drop file:// protocol (automatically added by sass compiler)
+        sourceMap = sourceMap.replaceAll("file://", "");
+
+        String sourceMapUrl;
+        if (embedSourceMap) {
+            sourceMapUrl = "data:application/json;charset=utf-8," + URLEncoder.encode(sourceMap, StandardCharsets.UTF_8);
+        } else {
+            sourceMapUrl = outputPath.getFileName().toString() + ".map";
+            Files.writeString(outputPath.getParent().resolve(sourceMapUrl), sourceMap);
+        }
+
+        return css + "/*# sourceMappingUrl=" + sourceMapUrl + " */";
+    }
+
+    /**
+     * Adds an "encoding prefix" to the provided CSS like dart-sass CLI would do, this is either:
+     * <ul>
+     *     <li>A UTF-8 byte order mark (\ufeff) if style=COMPRESSED</li>
+     *     <li>An <code>@charset "UTF-8";</code> CSS rule if style=EXPANDED</li>
+     * </ul>
+     */
+    protected String addEncodingPrefix(String css) {
+        if (style == Style.EXPANDED) {
+            return "@charset \"UTF-8\"" + System.lineSeparator() + css;
+        } else {
+            return "\ufeff" + css;
         }
     }
 
@@ -379,41 +477,23 @@ public class CompileSassMojo extends AbstractMojo {
         }
     }
 
-    protected SassCommand buildSassCommand() throws MojoExecutionException {
+    protected SassCompiler createSassCompiler() throws IOException {
+        Path tmpDir = SystemUtils.getExecutableTempFolder(dartSassReleaseParameter);
+        File sassExecutable = OSDetector.isWindows()
+                ? tmpDir.resolve("sass.bat").toFile()
+                : tmpDir.resolve("sass").toFile();
+
+        SassCompiler compiler = new SassCompiler(ConnectionFactory.ofExecutable(sassExecutable));
         if (loadPaths != null) {
-            for (File loadPath : loadPaths) {
-                sassCommandBuilder.withLoadPath(loadPath.toPath());
-            }
+            compiler.setLoadPaths(loadPaths);
         }
 
-        setOptions();
+        compiler.setSourceMapIncludeSources(embedSources);
+        compiler.setGenerateSourceMaps(!noSourceMap);
+        compiler.setQuietDeps(quietDeps);
+        compiler.setLoggingHandler(new MavenLoggingHandler(getLog(), quiet));
 
-        Path inputFolderPath = inputFolder.toPath();
-
-        sassCommandBuilder.withPaths(inputFolderPath, outputFolder.toPath());
-
-        try {
-            return sassCommandBuilder.build(dartSassReleaseParameter);
-        } catch (SassCommandException e) {
-            throw new MojoExecutionException(e);
-        }
-    }
-
-    protected void setOptions() {
-        sassCommandBuilder.withStyle(style);
-        sassCommandBuilder.withNoCharset(noCharset);
-        sassCommandBuilder.withErrorCSS(errorCSS);
-        sassCommandBuilder.withUpdate(update);
-        sassCommandBuilder.withNoSourceMap(noSourceMap);
-        sassCommandBuilder.withSourceMapURLs(sourceMapURLs);
-        sassCommandBuilder.withEmbedSources(embedSources);
-        sassCommandBuilder.withEmbedSourceMap(embedSourceMap);
-        sassCommandBuilder.withStopOnError(stopOnError);
-        sassCommandBuilder.withColor(color);
-        sassCommandBuilder.withNoUnicode(noUnicode);
-        sassCommandBuilder.withQuiet(quiet);
-        sassCommandBuilder.withQuietDeps(quietDeps);
-        sassCommandBuilder.withTrace(trace);
+        return compiler;
     }
 
     public File getInputFolder() {

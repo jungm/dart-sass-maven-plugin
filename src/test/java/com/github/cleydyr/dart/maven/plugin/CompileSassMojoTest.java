@@ -1,23 +1,21 @@
 package com.github.cleydyr.dart.maven.plugin;
 
 import com.github.cleydyr.dart.command.enums.SourceMapURLs;
-import com.github.cleydyr.dart.command.files.DefaultFileCounter;
 import com.github.cleydyr.dart.maven.plugin.test.util.TestUtil;
 import com.github.cleydyr.dart.net.DummyGithubLatestVersionProvider;
 import com.github.cleydyr.dart.system.io.OSDependentDefaultCachedFilesDirectoryProviderFactory;
 import com.github.cleydyr.maven.plugin.CompileSassMojo;
+import junit.framework.TestCase;
+import org.apache.maven.it.util.ResourceExtractor;
+
 import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import junit.framework.TestCase;
-import org.apache.maven.it.util.ResourceExtractor;
 
 public class CompileSassMojoTest extends TestCase {
     public void testNoSourceMapFlag() throws Exception {
         CompileSassMojo compileSassMojo = new CompileSassMojo(
-                new DefaultFileCounter(),
-                () -> null,
                 (any0, any1, any2) -> null,
                 new DummyGithubLatestVersionProvider(),
                 new OSDependentDefaultCachedFilesDirectoryProviderFactory(),

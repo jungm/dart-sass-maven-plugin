@@ -6,6 +6,9 @@ import com.github.cleydyr.dart.net.GithubLatestVersionProvider;
 import com.github.cleydyr.dart.system.io.DefaultCachedFilesDirectoryProviderFactory;
 import com.github.cleydyr.dart.system.io.factory.DartSassExecutableExtractorFactory;
 import javax.inject.Inject;
+
+import org.apache.maven.plugin.MojoExecutionException;
+import org.apache.maven.plugin.MojoFailureException;
 import org.apache.maven.plugins.annotations.Mojo;
 import org.apache.maven.plugins.annotations.Parameter;
 import org.apache.maven.settings.MavenSettingsBuilder;
@@ -33,21 +36,12 @@ public class WatchSassMojo extends CompileSassMojo {
             GithubLatestVersionProvider githubLatestVersionProvider,
             DefaultCachedFilesDirectoryProviderFactory cachedFilesDirectoryProviderFactory,
             MavenSettingsBuilder mavenSettingsBuilder) {
-        super(
-                fileCounter,
-                sassCommandBuilderFactory,
-                dartSassExecutableExtractorFactory,
-                githubLatestVersionProvider,
-                cachedFilesDirectoryProviderFactory,
-                mavenSettingsBuilder);
+        super(dartSassExecutableExtractorFactory, githubLatestVersionProvider, cachedFilesDirectoryProviderFactory, mavenSettingsBuilder);
     }
 
     @Override
-    protected void setOptions() {
-        super.setOptions();
-
-        sassCommandBuilder.withWatch(true);
-        sassCommandBuilder.withPoll(poll);
+    public void execute() throws MojoExecutionException, MojoFailureException {
+        // TODO filewatcher
     }
 
     public boolean isPoll() {

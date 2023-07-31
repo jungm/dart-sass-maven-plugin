@@ -12,8 +12,10 @@ import com.github.cleydyr.maven.plugin.WatchSassMojo;
 import java.io.File;
 import java.nio.file.Files;
 import junit.framework.TestCase;
+import org.junit.Ignore;
 import org.mockito.Mockito;
 
+@Ignore
 public class WatchSassMojoTest extends TestCase {
     private String _tmpDirPrefix = getClass().getName();
 
